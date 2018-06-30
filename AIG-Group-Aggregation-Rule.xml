@@ -1,4 +1,8 @@
-<?xml version='1.0' encoding='UTF-8'?>
+<
+Change 1 Aggregation rule 
+
+
+?xml version='1.0' encoding='UTF-8'?>
 <!DOCTYPE Rule PUBLIC "sailpoint.dtd" "sailpoint.dtd">
 <Rule language="beanshell" id="custom001" name="AIG-Group-Aggregation-Rule" type="GroupAggregationRefresh">
   <Description>This rule is used to set the owner or modify the account group before it is persisted to the database.</Description>
