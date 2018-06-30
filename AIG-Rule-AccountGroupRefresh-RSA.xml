@@ -1,0 +1,87 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE Rule PUBLIC "sailpoint.dtd" "sailpoint.dtd">
+<Rule created="1523425346490" id="" language="beanshell" modified="1524976384149" name="AIG-Rule-AccountGroupRefresh-RSA" type="GroupAggregationRefresh">
+  <Description>A ManagedAttributeCustomization rule is called when ManagedAttributes are automatically created during aggregation, refresh, or from the missing entitlement descriptions task.
+
+This can modify the AccountGroupRefresh that is passed in to set fields such as owner, requestable, or explanations before they are saved.</Description>
+  <Signature returnType="Object">
+    <Inputs>
+      <Argument name="log">
+        <Description>
+          The log object associated with the SailPointContext.
+        </Description>
+      </Argument>
+      <Argument name="context">
+        <Description>
+          A sailpoint.api.SailPointContext object that can be used to query the database if necessary.
+        </Description>
+      </Argument>
+      <Argument name="environment" type="Map">
+        <Description>
+          Arguments passed to the aggregation task.
+        </Description>
+      </Argument>
+      <Argument name="obj" type="ResourceObject">
+        <Description>
+          A sailpoint.object.ResourceObject generated from the application
+          and the ProvisioningPlan's ObjectRequest.
+        </Description>
+      </Argument>
+      <Argument name="accountGroup" type="ManagedAttribute">
+        <Description>
+          The account group being refreshed.
+        </Description>
+      </Argument>
+      <Argument name="groupApplication" type="Application">
+        <Description>
+          Application being aggregated.
+        </Description>
+      </Argument>
+    </Inputs>
+    <Returns>
+      <Argument name="accountGroup" type="ManagedAttribute">
+        <Description>
+          The refreshed account group object.
+        </Description>
+      </Argument>
+    </Returns>
+  </Signature>
+  <Source>import sailpoint.object.ManagedAttribute;
+  import sailpoint.object.Identity;  
+  import sailpoint.tools.Util;
+  import sailpoint.object.QueryOptions;
+  import sailpoint.object.Filter;
+
+
+  
+  if(groupApplication.getName().equals("Unix Server Local Users-RSA"))
+  {
+  
+	accountGroup.setOwner(groupApplication.getOwner());
+  }
+  else{
+  String ownerEmail = (String) accountGroup.getAttribute("Role Owner");
+		
+  
+  
+		Filter filter = Filter.ignoreCase(Filter.eq("email", ownerEmail));
+		filter = Filter.and(filter, Filter.eq("inactive", false));
+		filter = Filter.and(filter,Filter.eq("correlated", true));
+		
+		QueryOptions options = new QueryOptions();
+		options.addFilter(filter);
+		
+		List owners = context.getObjects(Identity.class, options);
+		
+		if(!Util.isEmpty(owners) &amp;&amp; owners.size()==1){
+			accountGroup.setOwner((Identity)owners.get(0));
+		}
+		
+		else
+		{
+			accountGroup.setOwner(groupApplication.getOwner());
+		}
+		}
+		
+		return accountGroup;</Source>
+</Rule>

@@ -1,0 +1,292 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE Rule PUBLIC "sailpoint.dtd" "sailpoint.dtd">
+<Rule language="beanshell" name="AIG-Rule-AfterProvisioning-FA-RDPS-Rewrite" type="AfterProvisioning">
+  <Description>An IdentityIQ server-side rule that is executed after the connector's provisioning method is called. This gives the customer the ability to customize or react to anything in the ProvisioningPlan AFTER it has been sent out to the specific applications. 
+	This rule will be called for any application found in a plan that also has a configured 'afterProvisioningRule' configured.</Description>
+	
+  <ReferencedRules>
+ 	<Reference class="sailpoint.object.Rule" name="AIG-Rule-ReferenceRule-ProvisioningUtil"/> 
+    <Reference class="sailpoint.object.Rule" name="AIG-Rule-General-CreateServiceNowTicket"/>
+    <Reference class="sailpoint.object.Rule" name="AIG-Rule-ReferenceRule-CertUtil"/>
+	
+  </ReferencedRules>
+  
+  <Signature>
+    <Inputs>
+      <Argument name="log">
+        <Description>
+          The log object associated with the SailPointContext.
+        </Description>
+      </Argument>
+      <Argument name="context">
+        <Description>
+          A sailpoint.api.SailPointContext object that can be used to query the database if necessary.
+        </Description>
+      </Argument>
+      <Argument name="plan">
+        <Description>
+          The ProvisioningPlan object on its way to the Connector.
+        </Description>
+      </Argument>
+      <Argument name="application">
+        <Description>
+          The application object that references this before/after script.
+        </Description>
+      </Argument>
+      <Argument name="result">
+        <Description>
+          The ProvisioningResult object returned by the connectors provision method. This can be null and in many cases the connector will  not return a result and instead will annotate the plan's ProvisioningResult either at the plan or account level.        
+        </Description>
+      </Argument>
+    </Inputs>
+  </Signature>
+  <Source>
+    <![CDATA[
+	
+			import java.io.PrintWriter;
+			import java.io.StringWriter;
+			import java.util.*;
+
+			import org.apache.log4j.Logger;			
+			
+			import sailpoint.integration.RequestResult;
+			import sailpoint.integration.servicenow.ServiceNowIntegrationExecutor;
+
+			import sailpoint.object.Application;
+			import sailpoint.object.ProvisioningPlan;
+			import sailpoint.object.ProvisioningResult;
+			import sailpoint.object.Configuration;
+			import sailpoint.object.IntegrationConfig;
+			import sailpoint.object.Attributes;
+			import sailpoint.object.Identity;
+			import sailpoint.object.AuditEvent;
+			import sailpoint.object.QueryOptions;
+			import sailpoint.object.Filter;
+
+			import sailpoint.object.ProvisioningPlan.AccountRequest;
+			import sailpoint.object.ProvisioningPlan.AttributeRequest;
+			import sailpoint.object.ProvisioningPlan.AccountRequest.Operation;
+			import sailpoint.tools.GeneralException;
+
+			//Logger log = Logger.getLogger("custom.jdbc_provision_rule"); //Sandbox only
+			
+	String getRequesterNames(List requesters) {
+		
+		StringBuilder builder = new StringBuilder();
+		if(requesters != null){
+			for(Object requester : requesters)
+			{
+				if(requester instanceof Identity)
+				{
+					Identity identity = (Identity)requester;
+					String name = identity.getName();
+					
+					if(name != null){
+						name = name.trim();
+						builder.append(name+",");
+					}
+					
+				}
+			}
+		}		
+		
+		String retStr = builder.toString();
+		return retStr.substring(0, Math.max(retStr.length()-1, 0));
+	}
+	
+	String createMessage(String template, Map vars)
+	{
+		String msg = template;
+		for(Object key : vars.keySet())
+		{
+			Object value = vars.get(key);
+			if(value != null){
+				msg = msg.replaceAll(java.util.regex.Pattern.quote(key.toString()), value.toString());				
+			}
+		}
+		return msg;
+	}
+	
+	AuditEvent getProvisionAuditEvent(Map argsMap) throws GeneralException
+	{
+		
+		String nativeIdentity = (String)argsMap.get("account");
+		String op = (String)argsMap.get("action");
+		String appName = (String)argsMap.get("sourceApplication");
+		String certId = (String)argsMap.get("string2");
+
+		
+		QueryOptions qOpts = new QueryOptions();
+		
+		qOpts.addFilter( Filter.eq("source", "SailPoint-OperationProvisioning") );
+		qOpts.addFilter( Filter.eq("application", appName.trim()) );
+		qOpts.addFilter( Filter.eq("accountName", nativeIdentity.trim()) );
+		qOpts.addFilter( Filter.eq("action", op.trim()) );
+		qOpts.addFilter( Filter.eq("string2", certId.trim()) );		
+		
+		qOpts.addFilter( Filter.isnull("attributeName") );
+		qOpts.addFilter( Filter.isnull("attributeValue") );
+
+		log.debug("QueryOptions:"+qOpts.toString());		
+		
+		Iterator iter = context.search(AuditEvent.class, qOpts);
+		return iter.hasNext() ? (AuditEvent)iter.next() : null;
+		
+	}
+	
+	HashMap createAuditEventItemMap(Map datamap, IntegrationConfig intConfig)
+	{
+		String EVENT_ID_KEY = "RequestID";
+	    Object defaultIncidentIdValue = intConfig.getAttribute("INCIDENT_ID_VALUE_PLACEHOLDER");
+	    Object defaultIncidentStateValue = intConfig.getAttribute("INCIDENT_STATE_VALUE_PLACEHOLDER");
+				
+		HashMap auditItem = new HashMap();
+
+		String[] copyKeys = { 	"application", "account", "name", "value", 
+								"identity_name", "target", "instance" };
+		
+		for(int i=0; i<copyKeys.length; i++){
+			auditItem.put(copyKeys[i], datamap.get(copyKeys[i]));			
+		}
+		
+		auditItem.put("source", "SailPoint-ServiceNowScheduler");
+		auditItem.put("op", "remediate");
+		auditItem.put("value2", defaultIncidentIdValue);
+		auditItem.put("value3", "|" + datamap.get(EVENT_ID_KEY) );
+		auditItem.put("value4", defaultIncidentStateValue);
+		
+		Map attrMap = new HashMap();
+		attrMap.put("description", "This ticket was created as an aditional provisioning request.");
+		auditItem.put("attributes", attrMap);
+		
+		return auditItem;
+	}
+	
+	
+	
+			log.info("==========STARTING AIG-Rule-AfterProvisioning-FA-RDPS-Rewrite==========");
+						
+			log.debug("ProvisioningPlan:\n"+plan.toXml());
+			log.debug("ProvisioningResult:\n"+result.toXml());
+
+		String targetAppName = "IDM-IAT [ID_NA]";
+		String sourceAppName = application.getName();		
+	    IntegrationConfig intConfig = context.getObjectByName(IntegrationConfig.class, "AIG-IntegrationConfig-ServiceNow");
+		Configuration conf = context.getObjectByName(Configuration.class, "AIG-Configuration-ServiceNowIntegration");
+		Attributes confAttr = conf.getAttributes();				
+
+		log.debug("sourceAppName: "+sourceAppName);
+		log.debug("targetAppName: "+targetAppName);
+		
+		Map appConfig = (Map) confAttr.get("integratedApplications");
+		Map appMap = (Map)appConfig.get(targetAppName);
+				
+		if(appMap == null){
+			log.error("No entry for "+targetAppName+" in ServiceNow config.");
+		}
+		
+		Identity identity = plan.getIdentity();
+		String identityName = null;
+		if(identity != null){
+			identityName = identity.getName();
+		}
+		
+		String messageTemplate=(String)application.getAttributeValue("aig.ticketMessageTemplate");
+		log.debug("Ticket messageTemplate:"+messageTemplate);
+
+		
+		if(ProvisioningResult.STATUS_COMMITTED.equals(result.getStatus()))
+		{						
+			List argsList = parseProvisioningPlan(plan);
+			String certificers = getRequesterNames(plan.getRequesters());
+			
+			
+			for(Object args : argsList)
+			{
+				if(args instanceof Map)
+				{
+					Map argsMap = (Map)args;
+					
+					String nativeIdentity = (String)argsMap.get("nativeIdentity");
+					String op = (String)argsMap.get("op");
+					String appName = (String)argsMap.get("application");
+					String certName = (String)argsMap.get("sourceName");
+					String certId = (String)argsMap.get("sourceId");
+										
+					if(!sourceAppName.equals(appName)){
+						log.warn("SKIPPING argsMap because app is not "+sourceAppName+". "+argsMap);
+						continue;
+					}
+					
+					if(!Operation.Delete.equals(Operation.valueOf(op))){
+						log.warn("SKIPPING argsMap because op is not "+Operation.Delete+". "+argsMap);
+						continue;						
+					}
+					
+					
+					Map msgVars = new HashMap();
+					msgVars.put("${REMOVE_GROUP}", "CN=RORDPSACCEPTED,OU=GROUPS,OU=RDPS,OU=APPS,O=AIG-IDV");
+					msgVars.put("${AIGEID}", nativeIdentity);
+					msgVars.put("${CERTIFICATION_NAME}", certName);
+					msgVars.put("${CERTIFIER_NAMES}", certificers);
+					
+					
+					String ticketMsg = createMessage(messageTemplate, msgVars);
+					log.debug("Final ticket message:"+ticketMsg);
+					
+//*		
+					HashMap datamap = new HashMap();
+					datamap.putAll(appMap);
+					
+					datamap.put("identity_name", identityName);
+					datamap.put("application", targetAppName);
+					datamap.put("sourceApplication", sourceAppName);
+					datamap.put("account", nativeIdentity);
+					datamap.put("name", "groupMembership");
+					datamap.put("value", msgVars.get("${REMOVE_GROUP}"));
+					datamap.put("action", op);
+					datamap.put("string2", certId);
+					datamap.put("target", certId);
+	
+					log.debug("Looking for Provision Audit Event. datamap:"+datamap);
+					AuditEvent provEvent = getProvisionAuditEvent(datamap);
+					if(provEvent != null){
+						log.debug("provEvent id:"+provEvent.getId());
+						datamap.put("instance", provEvent.getId());
+					}
+					else{
+						log.warn("Could not find provision AuditEvent for "+datamap);
+					}
+					
+//*
+					
+					ArrayList descriptionList = new ArrayList();
+					descriptionList.add(ticketMsg);
+					datamap.put( "descriptionlist", descriptionList);
+
+					log.debug("Attempting to create ticket:");										
+					HashMap response = SendServiceNowTicket( datamap);
+					datamap.putAll(response);					
+					log.debug("create ticket response:"+response);										
+					
+					String saveAuditStatus = AddAuditEntry(createAuditEventItemMap(datamap, intConfig));									
+					log.debug("Save Audit Event status:"+saveAuditStatus);										
+//*/					
+				}
+			}
+			
+		}
+		else
+		{
+			log.warn("Skipping additional provisioning because Provisioning Result status is not commited.");
+			log.warn("Plan: "+plan.toXml());
+			log.warn("Result: "+result.toXml());
+		}
+
+			
+			
+			log.info("==========ENDING AIG-Rule-AfterProvisioning-FA-RDPS-Rewrite==========");
+			
+	]]>  
+</Source>
+</Rule>
